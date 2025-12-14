@@ -6,9 +6,11 @@ from picamera2 import Picamera2
 import time
 import pickle
 from datetime import datetime
-import subprocess
 import csv
 import os
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 # Load pre-trained face encodings
 print("[INFO] loading encodings...")
@@ -21,6 +23,13 @@ known_face_names = data["names"]
 picam2 = Picamera2()
 picam2.configure(picam2.create_preview_configuration(main={"format": 'XRGB8888', "size": (1920, 1080)}))
 picam2.start()
+
+# Email configuration - Update these with your email credentials
+SMTP_SERVER = "smtp.gmail.com"  # For Gmail. For Outlook: smtp-mail.outlook.com, For Yahoo: smtp.mail.yahoo.com
+SMTP_PORT = 587  # Use 587 for TLS, 465 for SSL
+SENDER_EMAIL = "rutvikdeshpande11@gmail.com"  # Your email address
+SENDER_PASSWORD = "vpch toji olin pfsc"  # Your email password or App Password (for Gmail, use App Password)
+RECIPIENT_EMAIL = "preetamd@gmail.com"  # Recipient email address
 
 # Initialize our variables
 cv_scaler = 4 # this has to be a whole number
@@ -119,7 +128,7 @@ def save_attendance(name, timestamp):
                         timestamp.strftime('%Y-%m-%d %H:%M:%S')])
 
 def send_attendance_email():
-    """Send attendance report via email using system mail command"""
+    """Send attendance report via email using SMTP"""
     # Read attendance from CSV file
     if not os.path.isfile(attendance_file):
         print("[INFO] No attendance records found. Email not sent.")
@@ -167,33 +176,32 @@ def send_attendance_email():
     email_body += "\n" + "=" * 50 + "\n"
     email_body += "This is an automated message from the Raspberry Pi Attendance System.\n"
     
-    # Get recipient email from environment variable or use default
-    recipient_email = os.environ.get('ATTENDANCE_EMAIL', 'rutvikdeshpande11@gmail.com')  # Change default as needed
+    # Create email message
+    msg = MIMEMultipart()
+    msg['From'] = SENDER_EMAIL
+    msg['To'] = RECIPIENT_EMAIL
+    msg['Subject'] = email_subject
+    msg.attach(MIMEText(email_body, 'plain'))
     
-    # Send email using system mail command (requires mailutils or sendmail)
+    # Send email using SMTP
     try:
-        # Create email content with headers
-        email_content = f"""Subject: {email_subject}
-To: {recipient_email}
-From: raspberrypi@local
-Content-Type: text/plain
-
-{email_body}
-"""
+        # Connect to SMTP server
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls()  # Enable encryption
+        server.login(SENDER_EMAIL, SENDER_PASSWORD)
         
-        # Send email using sendmail command
-        process = subprocess.Popen(['sendmail', recipient_email], 
-                                  stdin=subprocess.PIPE,
-                                  stdout=subprocess.PIPE,
-                                  stderr=subprocess.PIPE)
-        process.communicate(input=email_content.encode('utf-8'))
+        # Send email
+        text = msg.as_string()
+        server.sendmail(SENDER_EMAIL, RECIPIENT_EMAIL, text)
+        server.quit()
         
-        if process.returncode == 0:
-            print(f"[INFO] Attendance email sent successfully to {recipient_email}")
-        else:
-            print(f"[WARNING] Failed to send email. Make sure mailutils is installed: sudo apt-get install mailutils")
-    except FileNotFoundError:
-        print(f"[WARNING] sendmail not found. Install mailutils: sudo apt-get install mailutils")
+        print(f"[INFO] Attendance email sent successfully to {RECIPIENT_EMAIL}")
+    except smtplib.SMTPAuthenticationError:
+        print(f"[ERROR] Authentication failed. Please check your email and password.")
+        print(f"[INFO] For Gmail, you need to use an App Password, not your regular password.")
+        print(f"[INFO] Generate one at: https://myaccount.google.com/apppasswords")
+    except smtplib.SMTPException as e:
+        print(f"[ERROR] SMTP error occurred: {str(e)}")
     except Exception as e:
         print(f"[ERROR] Failed to send email: {str(e)}")
 
