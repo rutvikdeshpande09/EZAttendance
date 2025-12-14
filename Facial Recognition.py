@@ -6,9 +6,12 @@ from picamera2 import Picamera2
 import time
 import pickle
 from datetime import datetime
-import subprocess
 import csv
 import os
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.image import MIMEImage
 
 # Load pre-trained face encodings
 print("[INFO] loading encodings...")
@@ -22,8 +25,21 @@ picam2 = Picamera2()
 picam2.configure(picam2.create_preview_configuration(main={"format": 'XRGB8888', "size": (1920, 1080)}))
 picam2.start()
 
+# Email configuration - Update these with your email credentials
+SMTP_SERVER = "smtp.gmail.com"  # For Gmail. For Outlook: smtp-mail.outlook.com, For Yahoo: smtp.mail.yahoo.com
+SMTP_PORT = 587  # Use 587 for TLS, 465 for SSL
+SENDER_EMAIL = "rutvikdeshpande11@gmail.com"  # Your email address
+SENDER_PASSWORD = "vpch toji olin pfsc"  # Your email password or App Password (for Gmail, use App Password)
+RECIPIENT_EMAIL = "preetamd@gmail.com"  # Recipient email address
+
 # Initialize our variables
 cv_scaler = 4 # this has to be a whole number
+photos_folder = "detected_photos"  # Folder to save photos of detected persons
+attendance_file = "attendance.csv"  # CSV file to store attendance records
+
+# Create photos folder if it doesn't exist
+if not os.path.exists(photos_folder):
+    os.makedirs(photos_folder)
 
 face_locations = []
 face_encodings = []
@@ -33,7 +49,7 @@ start_time = time.time()
 fps = 0
 printed_names = set()  # Track names that have been printed
 attendance_data = {}  # Track attendance with timestamps: {name: [datetime1, datetime2, ...]}
-attendance_file = "attendance.csv"  # CSV file to store attendance records
+detected_images = {}  # Track images of detected persons: {name: image_path}
 
 def process_frame(frame):
     global face_locations, face_encodings, face_names, printed_names
@@ -49,7 +65,7 @@ def process_frame(frame):
     face_encodings = face_recognition.face_encodings(rgb_resized_frame, face_locations, model='large')
     
     face_names = []
-    for face_encoding in face_encodings:
+    for i, face_encoding in enumerate(face_encodings):
         # See if the face is a match for the known face(s)
         matches = face_recognition.compare_faces(known_face_encodings, face_encoding)
         name = "Unknown"
@@ -73,6 +89,35 @@ def process_frame(frame):
             
             # Save to CSV file
             save_attendance(name, current_time)
+            
+            # Capture and save image of the detected person
+            if i < len(face_locations):
+                # Get face location in original frame coordinates
+                (top, right, bottom, left) = face_locations[i]
+                top_orig = top * cv_scaler
+                right_orig = right * cv_scaler
+                bottom_orig = bottom * cv_scaler
+                left_orig = left * cv_scaler
+                
+                # Add some padding around the face
+                padding = 50
+                top_orig = max(0, top_orig - padding)
+                left_orig = max(0, left_orig - padding)
+                bottom_orig = min(frame.shape[0], bottom_orig + padding)
+                right_orig = min(frame.shape[1], right_orig + padding)
+                
+                # Extract face region from original frame
+                face_image = frame[top_orig:bottom_orig, left_orig:right_orig]
+                
+                # Save the image
+                timestamp_str = current_time.strftime('%Y%m%d_%H%M%S')
+                image_filename = f"{name}_{timestamp_str}.jpg"
+                image_path = os.path.join(photos_folder, image_filename)
+                cv2.imwrite(image_path, face_image)
+                
+                # Store image path for email attachment
+                detected_images[name] = image_path
+                print(f"[INFO] Saved photo: {image_path}")
         
         face_names.append(name)
     
@@ -119,81 +164,109 @@ def save_attendance(name, timestamp):
                         timestamp.strftime('%Y-%m-%d %H:%M:%S')])
 
 def send_attendance_email():
-    """Send attendance report via email using system mail command"""
-    # Read attendance from CSV file
-    if not os.path.isfile(attendance_file):
-        print("[INFO] No attendance records found. Email not sent.")
-        return
+    """Send attendance report via email using SMTP"""
+    # Get all unique known names from the training data
+    all_known_names = sorted(list(set(known_face_names)))
+    
+    # Get current timestamp
+    current_timestamp = datetime.now()
+    timestamp_str = current_timestamp.strftime('%Y-%m-%d %H:%M:%S')
     
     # Build email content
-    email_subject = f"Attendance Report - {datetime.now().strftime('%Y-%m-%d')}"
-    email_body = f"Attendance Report for {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-    email_body += "=" * 50 + "\n\n"
+    email_subject = f"Attendance Report - {current_timestamp.strftime('%Y-%m-%d')}"
+    email_body = f"Attendance Report for {timestamp_str}\n\n"
+    email_body += "=" * 60 + "\n\n"
     
-    # Read attendance data from CSV
-    today = datetime.now().strftime('%Y-%m-%d')
-    today_records = []
+    # Read attendance data from CSV for today
+    today = current_timestamp.strftime('%Y-%m-%d')
+    today_records = {}
     
-    with open(attendance_file, 'r') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            if row['Date'] == today:
-                today_records.append(row)
+    if os.path.isfile(attendance_file):
+        with open(attendance_file, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row['Date'] == today:
+                    name = row['Name']
+                    if name not in today_records:
+                        today_records[name] = []
+                    today_records[name].append(row['Time'])
     
-    if today_records:
-        email_body += f"Today's Attendance ({today}):\n"
-        email_body += "-" * 50 + "\n"
-        
-        # Group by name
-        name_records = {}
-        for record in today_records:
-            name = record['Name']
-            if name not in name_records:
-                name_records[name] = []
-            name_records[name].append(record['Time'])
-        
-        for name in sorted(name_records.keys()):
-            times = name_records[name]
+    # Build attendance list with all names
+    email_body += f"Today's Attendance ({today}):\n"
+    email_body += "-" * 60 + "\n\n"
+    
+    present_count = 0
+    absent_count = 0
+    
+    # List all known names with their status
+    # Only mark as present if their photo was taken
+    for name in all_known_names:
+        if name in today_records and name in detected_images:
+            # Person is present (detected AND photo captured)
+            times = today_records[name]
             first_seen = times[0]
             last_seen = times[-1]
             count = len(times)
-            email_body += f"{name}:\n"
+            email_body += f"✓ {name}: PRESENT\n"
             email_body += f"  First seen: {first_seen}\n"
             email_body += f"  Last seen: {last_seen}\n"
             email_body += f"  Total detections: {count}\n\n"
-    else:
-        email_body += "No attendance records for today.\n"
+            present_count += 1
+        else:
+            # Person is absent (either not detected or photo not taken)
+            email_body += f"✗ {name}: ABSENT\n\n"
+            absent_count += 1
     
-    email_body += "\n" + "=" * 50 + "\n"
+    # Summary
+    email_body += "-" * 60 + "\n"
+    email_body += f"Summary:\n"
+    email_body += f"  Present: {present_count}\n"
+    email_body += f"  Absent: {absent_count}\n"
+    email_body += f"  Total: {len(all_known_names)}\n"
+    
+    email_body += "\n" + "=" * 60 + "\n"
+    email_body += "Photos of detected persons are attached to this email.\n"
     email_body += "This is an automated message from the Raspberry Pi Attendance System.\n"
     
-    # Get recipient email from environment variable or use default
-    recipient_email = os.environ.get('ATTENDANCE_EMAIL', 'rutvikdeshpande11@gmail.com')  # Change default as needed
+    # Create email message
+    msg = MIMEMultipart()
+    msg['From'] = SENDER_EMAIL
+    msg['To'] = RECIPIENT_EMAIL
+    msg['Subject'] = email_subject
+    msg.attach(MIMEText(email_body, 'plain'))
     
-    # Send email using system mail command (requires mailutils or sendmail)
+    # Attach images of detected persons
+    for name, image_path in detected_images.items():
+        if os.path.isfile(image_path):
+            try:
+                with open(image_path, 'rb') as f:
+                    img_data = f.read()
+                    image = MIMEImage(img_data)
+                    image.add_header('Content-Disposition', 'attachment', filename=os.path.basename(image_path))
+                    msg.attach(image)
+                    print(f"[INFO] Attached photo for {name}: {os.path.basename(image_path)}")
+            except Exception as e:
+                print(f"[WARNING] Failed to attach image for {name}: {str(e)}")
+    
+    # Send email using SMTP
     try:
-        # Create email content with headers
-        email_content = f"""Subject: {email_subject}
-To: {recipient_email}
-From: raspberrypi@local
-Content-Type: text/plain
-
-{email_body}
-"""
+        # Connect to SMTP server
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls()  # Enable encryption
+        server.login(SENDER_EMAIL, SENDER_PASSWORD)
         
-        # Send email using sendmail command
-        process = subprocess.Popen(['sendmail', recipient_email], 
-                                  stdin=subprocess.PIPE,
-                                  stdout=subprocess.PIPE,
-                                  stderr=subprocess.PIPE)
-        process.communicate(input=email_content.encode('utf-8'))
+        # Send email
+        text = msg.as_string()
+        server.sendmail(SENDER_EMAIL, RECIPIENT_EMAIL, text)
+        server.quit()
         
-        if process.returncode == 0:
-            print(f"[INFO] Attendance email sent successfully to {recipient_email}")
-        else:
-            print(f"[WARNING] Failed to send email. Make sure mailutils is installed: sudo apt-get install mailutils")
-    except FileNotFoundError:
-        print(f"[WARNING] sendmail not found. Install mailutils: sudo apt-get install mailutils")
+        print(f"[INFO] Attendance email sent successfully to {RECIPIENT_EMAIL}")
+    except smtplib.SMTPAuthenticationError:
+        print(f"[ERROR] Authentication failed. Please check your email and password.")
+        print(f"[INFO] For Gmail, you need to use an App Password, not your regular password.")
+        print(f"[INFO] Generate one at: https://myaccount.google.com/apppasswords")
+    except smtplib.SMTPException as e:
+        print(f"[ERROR] SMTP error occurred: {str(e)}")
     except Exception as e:
         print(f"[ERROR] Failed to send email: {str(e)}")
 
