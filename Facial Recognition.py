@@ -6,9 +6,11 @@ from picamera2 import Picamera2
 import time
 import pickle
 from datetime import datetime
-import subprocess
 import csv
 import os
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 # Load pre-trained face encodings
 print("[INFO] loading encodings...")
@@ -21,6 +23,13 @@ known_face_names = data["names"]
 picam2 = Picamera2()
 picam2.configure(picam2.create_preview_configuration(main={"format": 'XRGB8888', "size": (1920, 1080)}))
 picam2.start()
+
+# Email configuration - Update these with your email credentials
+SMTP_SERVER = "smtp.gmail.com"  # For Gmail. For Outlook: smtp-mail.outlook.com, For Yahoo: smtp.mail.yahoo.com
+SMTP_PORT = 587  # Use 587 for TLS, 465 for SSL
+SENDER_EMAIL = "rutvikdeshpande11@gmail.com"  # Your email address
+SENDER_PASSWORD = "vpch toji olin pfsc"  # Your email password or App Password (for Gmail, use App Password)
+RECIPIENT_EMAIL = "rishaan.d.homeacct@gmail.com"  # Recipient email address
 
 # Initialize our variables
 cv_scaler = 4 # this has to be a whole number
@@ -119,81 +128,90 @@ def save_attendance(name, timestamp):
                         timestamp.strftime('%Y-%m-%d %H:%M:%S')])
 
 def send_attendance_email():
-    """Send attendance report via email using system mail command"""
-    # Read attendance from CSV file
-    if not os.path.isfile(attendance_file):
-        print("[INFO] No attendance records found. Email not sent.")
-        return
+    """Send attendance report via email using SMTP"""
+    # Get all unique known names from the training data
+    all_known_names = sorted(list(set(known_face_names)))
     
     # Build email content
     email_subject = f"Attendance Report - {datetime.now().strftime('%Y-%m-%d')}"
     email_body = f"Attendance Report for {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-    email_body += "=" * 50 + "\n\n"
+    email_body += "=" * 60 + "\n\n"
     
-    # Read attendance data from CSV
+    # Read attendance data from CSV for today
     today = datetime.now().strftime('%Y-%m-%d')
-    today_records = []
+    today_records = {}
     
-    with open(attendance_file, 'r') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            if row['Date'] == today:
-                today_records.append(row)
+    if os.path.isfile(attendance_file):
+        with open(attendance_file, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row['Date'] == today:
+                    name = row['Name']
+                    if name not in today_records:
+                        today_records[name] = []
+                    today_records[name].append(row['Time'])
     
-    if today_records:
-        email_body += f"Today's Attendance ({today}):\n"
-        email_body += "-" * 50 + "\n"
-        
-        # Group by name
-        name_records = {}
-        for record in today_records:
-            name = record['Name']
-            if name not in name_records:
-                name_records[name] = []
-            name_records[name].append(record['Time'])
-        
-        for name in sorted(name_records.keys()):
-            times = name_records[name]
+    # Build attendance list with all names
+    email_body += f"Today's Attendance ({today}):\n"
+    email_body += "-" * 60 + "\n\n"
+    
+    present_count = 0
+    absent_count = 0
+    
+    # List all known names with their status
+    for name in all_known_names:
+        if name in today_records:
+            # Person is present
+            times = today_records[name]
             first_seen = times[0]
             last_seen = times[-1]
             count = len(times)
-            email_body += f"{name}:\n"
+            email_body += f"✓ {name}: PRESENT\n"
             email_body += f"  First seen: {first_seen}\n"
             email_body += f"  Last seen: {last_seen}\n"
             email_body += f"  Total detections: {count}\n\n"
-    else:
-        email_body += "No attendance records for today.\n"
+            present_count += 1
+        else:
+            # Person is absent
+            email_body += f"✗ {name}: ABSENT\n\n"
+            absent_count += 1
     
-    email_body += "\n" + "=" * 50 + "\n"
+    # Summary
+    email_body += "-" * 60 + "\n"
+    email_body += f"Summary:\n"
+    email_body += f"  Present: {present_count}\n"
+    email_body += f"  Absent: {absent_count}\n"
+    email_body += f"  Total: {len(all_known_names)}\n"
+    
+    email_body += "\n" + "=" * 60 + "\n"
     email_body += "This is an automated message from the Raspberry Pi Attendance System.\n"
     
-    # Get recipient email from environment variable or use default
-    recipient_email = os.environ.get('ATTENDANCE_EMAIL', 'rutvikdeshpande11@gmail.com')  # Change default as needed
+    # Create email message
+    msg = MIMEMultipart()
+    msg['From'] = SENDER_EMAIL
+    msg['To'] = RECIPIENT_EMAIL
+    msg['Subject'] = email_subject
+    msg.attach(MIMEText(email_body, 'plain'))
     
-    # Send email using system mail command (requires mailutils or sendmail)
+    # Send email using SMTP
     try:
-        # Create email content with headers
-        email_content = f"""Subject: {email_subject}
-To: {recipient_email}
-From: raspberrypi@local
-Content-Type: text/plain
-
-{email_body}
-"""
+        # Connect to SMTP server
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls()  # Enable encryption
+        server.login(SENDER_EMAIL, SENDER_PASSWORD)
         
-        # Send email using sendmail command
-        process = subprocess.Popen(['sendmail', recipient_email], 
-                                  stdin=subprocess.PIPE,
-                                  stdout=subprocess.PIPE,
-                                  stderr=subprocess.PIPE)
-        process.communicate(input=email_content.encode('utf-8'))
+        # Send email
+        text = msg.as_string()
+        server.sendmail(SENDER_EMAIL, RECIPIENT_EMAIL, text)
+        server.quit()
         
-        if process.returncode == 0:
-            print(f"[INFO] Attendance email sent successfully to {recipient_email}")
-        else:
-            print(f"[WARNING] Failed to send email. Make sure mailutils is installed: sudo apt-get install mailutils")
-    except FileNotFoundError:
-        print(f"[WARNING] sendmail not found. Install mailutils: sudo apt-get install mailutils")
+        print(f"[INFO] Attendance email sent successfully to {RECIPIENT_EMAIL}")
+    except smtplib.SMTPAuthenticationError:
+        print(f"[ERROR] Authentication failed. Please check your email and password.")
+        print(f"[INFO] For Gmail, you need to use an App Password, not your regular password.")
+        print(f"[INFO] Generate one at: https://myaccount.google.com/apppasswords")
+    except smtplib.SMTPException as e:
+        print(f"[ERROR] SMTP error occurred: {str(e)}")
     except Exception as e:
         print(f"[ERROR] Failed to send email: {str(e)}")
 
@@ -230,3 +248,4 @@ picam2.stop()
 print("[INFO] Program exited. Sending attendance report...")
 send_attendance_email()
 print("[INFO] Script ended.")
+
