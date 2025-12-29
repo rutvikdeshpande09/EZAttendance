@@ -168,7 +168,7 @@ def send_attendance_email():
     email_body += "This is an automated message from the Raspberry Pi Attendance System.\n"
     
     # Get recipient email from environment variable or use default
-    recipient_email = os.environ.get('ATTENDANCE_EMAIL', 'rutvikdeshpande11@gmail.com')  # Change default as needed
+    recipient_email = os.environ.get('ATTENDANCE_EMAIL', 'email')  # Change default as needed
     
     # Send email using system mail command (requires mailutils or sendmail)
     try:
