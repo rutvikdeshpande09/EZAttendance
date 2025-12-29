@@ -28,9 +28,9 @@ picam2.start()
 # Email configuration - Update these with your email credentials
 SMTP_SERVER = "smtp.gmail.com"  # For Gmail. For Outlook: smtp-mail.outlook.com, For Yahoo: smtp.mail.yahoo.com
 SMTP_PORT = 587  # Use 587 for TLS, 465 for SSL
-SENDER_EMAIL = "rutvikdeshpande11@gmail.com"  # Your email address
-SENDER_PASSWORD = "vpch toji olin pfsc"  # Your email password or App Password (for Gmail, use App Password)
-RECIPIENT_EMAIL = "preetamd@gmail.com"  # Recipient email address
+SENDER_EMAIL = "_"  # Your email address
+SENDER_PASSWORD = "_  # Your email password or App Password (for Gmail, use App Password)
+RECIPIENT_EMAIL = "_"  # Recipient email address
 
 # Initialize our variables
 cv_scaler = 4 # this has to be a whole number
